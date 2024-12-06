@@ -1,0 +1,17 @@
+[package]
+name = "nmux"
+version = "0.1.0"
+about = """
+A wrapper around tmuxp to allow more dynamic control over loading and managing workspaces.
+"""
+edition = "2021"
+
+[lib]
+name = "nmux_lib"
+path = "src/lib/nmux_lib.rs"
+
+[dependencies]
+clap = { version = "4.5.20", features = ["derive"] }
+homedir = "0.3.4"
+serde = { version = "1.0.213", features = ["derive"] }
+serde_yaml = "0.9.34"
