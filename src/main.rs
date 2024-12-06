@@ -1,84 +1,135 @@
-use std::{path::PathBuf, process::Command};
+use std::{fs::File, process::Command};
 
-use clap::{builder::Str, Parser, Subcommand};
+use clap::{ Parser, Subcommand};
+use dialoguer::{Confirm, Input};
+use nmux_lib::{error::NmuxError, prompt_for_file_path, types::{NmuxWorkflow, Pane, Window}};
 
 pub mod config;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Pane {
-    command: String,
-    focus: bool,
-    start_dir: PathBuf
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Window {
-    name: String,
-    panes: Vec<Pane>
-}
-
-#[derive(Subcommand, Clone, Debug, PartialEq)]
-pub enum SubCommands {
-    Create { workflow: String, session_name: String, windows: Vec<Window> },
-    Delete { workflow: String, session_name: String, },
-    None,
-}
-
-#[derive(Debug, Parser)]
-#[command(version, about)]
-struct NmuxArgs {
-    #[command(subcommand)]
-    cmd: SubCommands,
-
-    workflow: Option<String>,
-
-    #[arg(short, long)]
-    create: bool,
-
-    #[arg(short, long)]
+#[derive(Parser)] // Derives command-line argument parsing for this struct
+#[command(name = "nmux")]
+#[command(about = "A CLI tool for managing tmuxp workflows", version = "1.0")]
+struct Cli {
+    #[command(subcommand)] // Specify that the CLI will use subcommands
+    command: Option<Commands>,
+    
+    /// Append to the current session
+    #[arg(short, long, default_value_t = false)]
     append: bool,
-
-    #[arg(short, long)]
-    close: bool,
-
-    #[arg(short, long)]
-    workflows: Vec<String>,
+    
+    /// The name of the workflow to open (optional when using subcommands)
+    #[arg(required = false)]
+    workflow_name: Option<String>,
 }
 
-fn main() {
+#[derive(Subcommand)] // Defines the possible subcommands
+enum Commands {
+    /// Create a new workflow
+    Create,
+    Freeze
+}
+
+fn main() -> Result<(), NmuxError> {
+    let cli = Cli::parse(); // Parse the CLI arguments
+
     let home = match homedir::my_home() {
         Ok(o) => match o {
             Some(o) => o,
             None => {
                 eprintln!("Unable to locate home directory!");
-                return;
+                panic!();
             }
         },
         Err(e) => {
             eprintln!("Unable to get home directory! {}", e);
-            return;
+            panic!();
         }
     };
     
-    let mut tmuxp = Command::new("tmuxp");
-    let args = NmuxArgs::parse();
-    println!("args passed: {:#?}", args);
+    match &cli.command {
+        Some(Commands::Create) => {
+            let workflow_name: String = Input::new().with_prompt("What do you want to name this workflow?").interact_text().unwrap();
+            let mut windows: Vec<Window> = vec![];
 
-    match args.cmd {
-        SubCommands::Create(w) => { tmuxp.current_dir(home).arg() workflow }
+            loop {
+                let mut panes: Vec<Pane> = vec![];
+                loop {
+                    let command: String = Input::new().with_prompt("What command should be run ").interact_text().unwrap();
+                    let focus = Confirm::new().with_prompt("Do you want to focus this pane?").interact().unwrap();
+                    let start_dir = prompt_for_file_path();
+
+                    let pane = Pane {
+                        command,
+                        focus,
+                        start_dir
+                    };
+                    
+                    panes.push(pane);
+
+                    let make_another_pane = Confirm::new().with_prompt("Would you like to add another window?").interact().unwrap();
+                    if !make_another_pane {break;}
+                }
+
+                let window_name = Input::new().with_prompt("What do you want to name this window?").interact_text().unwrap();
+
+                let window = Window {
+                    name: window_name,
+                    panes
+                };
+
+                windows.push(window);
+                
+                let make_another_window = Confirm::new().with_prompt("Would you like to add another window?").interact().unwrap();
+                if !make_another_window {break;}
+            }
+
+            let workflow = NmuxWorkflow {
+                name: workflow_name.clone(),
+                windows
+            };
+
+            let workflow_file = File::create(format!("{}.yaml", workflow_name)).unwrap();
+
+            match serde_yml::to_writer(workflow_file, &workflow) {
+                Ok(()) => return Ok(()),
+                Err(e) => return Err(NmuxError::Serde(e))
+            };
+        }
+
+        Some(Commands::Freeze) => {
+            let mut tmuxp = Command::new("tmuxp");
+            tmuxp.current_dir(home).arg("freeze");
+            match tmuxp.output() {
+                Ok(o) => {
+                    println!("tmuxp output: {:#?}", o.stdout);
+                    return Ok(());
+                },
+                Err(e) => return Err(NmuxError::Io(e))
+            }
+        }
+
+        None => {
+            let mut tmuxp = Command::new("tmuxp");
+            if let Some(workflow_name) = cli.workflow_name {
+                tmuxp
+                    .current_dir(home)
+                    .arg("load")
+                    .arg(workflow_name);
+                
+                if cli.append {
+                    tmuxp.arg("-a");
+                }
+
+                match tmuxp.output() {
+                    Ok(o) => {
+                        println!("tmuxp output: {:#?}", o.stdout);
+                        return Ok(())
+                    },
+                    Err(e) => return Err(NmuxError::Io(e))
+                }                
+            } else {
+                return Err(NmuxError::Custom("No workflow name passed".into()));
+            }
+        }
     }
-
-
-    tmuxp
-        .current_dir(home)
-        .arg("load")
-        .arg(args.workflow.expect("No workflow provided to open!"));
-
-    if args.append {
-        tmuxp.arg("-a");
-    }
-
-    let out = tmuxp.output();
-
-    println!("{:#?}", out);
 }
